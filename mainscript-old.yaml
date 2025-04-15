@@ -1,0 +1,535 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: EKS Cluster in Singapore Region (ap-southeast-1)
+
+Mappings:
+  ServicePrincipals:
+    aws:
+      ec2: ec2.amazonaws.com
+
+Metadata:
+  Author: Tanuja Padmanabhuni
+  Version: 1.1
+  AWS::CLoudFormation::Interface:
+    ParametersGroups:
+      - Label:
+          default: EKS Cluster
+        Parameters:
+          - ClusterName
+          - ClusterControlPlaneSecurityGroup
+      - Label:
+          default: Worker Node Configuration
+        Parameters:
+          - NodeGroupName 
+          - NodeAutoScalingGroupMinSize 
+          - NodeAutoScalingGroupDesiredCapacity 
+          - NodeAutoScalingGroupMaxSize 
+          - NodeInstanceType 
+          - NodeImageIdSSMParam
+          - NodeImageId 
+          - NodeVolumeSize 
+          - KeyName 
+          - BootstrapArguments 
+      - Label:
+          default: Worker Node Network Configuration
+        Parameters:
+          - VpcId 
+          - Subnets 
+      - Label:
+          default: Multus CNI Configuration
+        Parameters:
+          - MultusSubnets
+          - MultusSecurityGroupIds
+          - SriovStartDevIndex
+          - SriovEndDevIndex
+          - LambdaS3Bucket
+          - LambdaS3Key
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: Name of the EKS Cluster
+    Default: EKS Cluster
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair to allow SSH access to the instances.
+
+  NodeAutoScalingGroupDesiredCapacity:
+    Type: Number
+    Description: Desired number of worker nodes
+    Default: 2
+
+  NodeAutoScalingGroupMaxSize:
+    Type: Number
+    Description: Maximum number of worker nodes
+    Default: 5
+
+  NodeAutoScalingGroupMinSize:
+    Type: Number
+    Description: Minimum number of worker nodes
+    Default: 1
+
+  NodeGroupName:
+    Type: String
+    Description: Name of the EKS Node Group
+    Default: EKS-NodeGroup
+
+  NodeImageIdSSMParam:
+    Type: String
+    Description: SSM Parameter store path for EKS optimized AMI ID
+    Default: /aws/service/eks/optimized-ami/1.30/amazon-linux-2/recommended/image-id
+
+  NodeInstanceType:
+    Type: String
+    Description: Instance type for worker nodes
+    Default: t3.medium
+
+  NodeVolumeSize:
+    Type: Number
+    Description: Root volume size for worker nodes in GB
+    Default: 100
+  
+  NodeImageID:
+    Type: String
+    Default: ''
+    Description: Specify own custom image ID, which this value overrides AWS System Manager Parameter Store
+
+  BootstrapArguments:
+    Type: String
+    Default: '--kubelet-extra-args ''--node-label=is_worker=true --topology-manager-policy=single-numa-node --cpu-manager-policy=static'''
+    Description: check files/bootstrap.sh in https://github.com/awslabs/amazon-eks-ami
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for Worker Node Instances
+  
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets where workers can be created
+
+  MultusSubnet:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of Subnet IDs for Multus CNI
+
+  MultusSecurityGroup:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: List of Security Group IDs for Multus CNI
+
+
+  SriovStartDevIndex:
+    Type: Number
+    Description: Starting device index for SR-IOV network interfaces
+    Default: 1
+
+  SriovEndDevIndex:
+    Type: Number
+    Description: Ending device index for SR-IOV network interfaces
+    Default: 1
+
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 bucket name for Lambda function code
+    Default: multusaws
+
+  LambdaS3Key:
+    Type: String
+    Description: S3 key for Lambda function code
+    Default: attach-eni-lambda.zip
+
+Resources:
+
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKSCNIPolicy
+        - arn:aws:iam::aws:policy/AmazonCloudFormationFullAccess
+      path: /
+
+  Ec2ApiAccessPolicy:
+    Type: AWS::IAM::Policy
+    DependsOn: NodeInstanceRole
+    Properties:
+      PolicyName: Ec2ApiAccessPolicy
+      Roles:
+        - !Ref NodeInstanceRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - ec2:DescribeNetworkInterface
+              - ec2:DescribeSubnets
+              - ec2:ModifyInstanceAttributes
+              - ec2:AssignPrivateIpAddresses
+            Resources: '*'
+
+  NodeInstanceProfile:
+    Type: AWS::IAM:InstanceProfile
+    Properties:
+      InstanceProfileName: eks-node-instance-profile
+      Roles:
+        -!Ref NodeInstanceRole
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      Description: Security group for all nodes in cluster
+      Tags:
+        - Key: !Sub kubernetes.io/cluster/${ClusterName}
+          Value: owned
+      VpcId: !Ref VpcId
+  NodeSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow node to communicate with each other
+      FromPort: 0
+      ToPort: 65535
+      GroupId: !Ref NodeSecurityGroup
+      IpProtocol: '-1'
+  
+  ClusterControlPlaneSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow pods to communicate with API server
+      FromPort: 443
+      ToPort: 443
+      GroupId: !Ref ClusterControlPlaneSecurityGroup
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+
+  ClusterControlPlaneEgressToNodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroupEgress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow the cluster control plane to communicate with worker nodes
+      FromPort: 1025
+      ToPort: 65535
+      GroupId: !Ref ClusterControlPlaneSecurityGroup
+      IpProtocol: tcp
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+  
+  ControlPlaneEgressToNodeSecurityGroupOn443:
+    Type: AWS::EC2::SecurityGroupEgress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow the cluster control plane to communicate with pods running extension API on port 443
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref NodeSecurityGroup
+      GroupId: !Ref ClusterControlPlaneSecurityGroup
+      IpProtocol: tcp
+  
+  NodeSecurityGroupFromControlPlaneIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: To recieve communication from Cluster control plane to worker pods
+      FromPort: 1025
+      ToPort: 65535
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref ClusterControlPlaneSecurityGroup
+      GroupId: !Ref NodeSecurityGroup
+
+  NodeSecurityGroupFromControlPlaneOn443Ingress:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: NodeSecurityGroup
+    Properties:
+      Description: Allow pods ruuning extension API servers on port 443 to recieve communication from control plane
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: tcp
+      SourceSecurityGroupId: !Ref ClusterControlPlaneSecurityGroup
+      GroupId: !Ref NodeSecurityGroup
+
+  NodeLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      AssociatePublicIpAddress: 'false'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeSize: !Ref NodeVolumeSize
+            VolumeType: gp2
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      ImageId: !If 
+        - HasNodeImageId
+        - !Ref NodeImageId
+        - !Ref NodeImageIdSSMParam
+      InstanceType: !Ref NodeInstanceType
+      KeyName: !Ref KeyName
+      SecurityGroups:
+        - !Ref NodeSecurityGroup
+      UserData: !Base64
+        Fn:: Sub: |
+          #!/bin/bash
+          set -o xtrace  # Enable debugging
+
+          # Load VFIO PCI module
+          modprobe vfio_pci
+
+          # Configure SR-IOV network devices
+          SRIOV_DEVICES=$(ls -1 /sys/class/net | grep eth)
+          for DEV in $SRIOV_DEVICES; do
+          PCI_PATH=$(readlink -f /sys/class/net/$DEV/device)
+          echo 0 > "$PCI_PATH/numa_node"  # Disable NUMA mode
+          echo "echo 0 > $PCI_PATH/numa_node" >> /etc/rc.d/rc.local
+          echo "dpdk-devbind.py -b vfio-pci $PCI_PATH" >> /etc/rc.d/rc.local
+          done
+
+          # Configure Multus Networking
+          echo "net.ipv4.conf.default.rp_filter = 0" | tee -a /etc/sysctl.conf
+          echo "net.ipv4.conf.all.rp_filter = 0" | tee -a /etc/sysctl.conf
+          sysctl -p  # Apply settings
+
+          # Wait before proceeding
+          sleep 45
+
+          # Bring up all network interfaces
+          for DEV in $(ls -1 /sys/class/net | grep eth); do
+          ip link set dev $DEV up
+          echo "ip link set dev $DEV up" >> /etc/rc.d/rc.local
+          done
+
+          # Enable rc.local for persistence
+          chmod +x /etc/rc.d/rc.local
+          systemctl enable rc.local
+
+          # Bootstrap AWS EKS Node
+          /etc/eks/bootstrap.sh "${ClusterName}" "${BootstrapArguments}"
+
+          # Install necessary packages
+          yum install -y
+
+          # Create logs directory
+          mkdir -p /data/logs
+
+          # Reboot system to apply all changes
+          reboot
+
+  NodeGroup:
+    Type: AWS::AUtoScaling::AutoScalingGroup
+    Properties:
+      DesiredCapacity: !Ref NodeAutoSCalingGroupDesiredCapacity
+      LaunchConfigurationName: !Ref NodeLaunchConfig
+      MaxSize: !Ref NodeAutoScalingGroupMaxSize
+      MinSize: !Ref NodeAutoScalingGroupMinSize
+      Tags:
+        - Key: Name
+          PropogationAtLaunch: 'true'
+          Value: !Sub ${ClusterName}-${NodeGroupName}-Node
+        - Key: !Sub Kubernetes.io/cluster/${ClusterName}
+          PropogationAtLaunch: 'true'
+          Value: owned
+      VPCZoneIdentifier: !Ref SUbnets
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: '1'
+        MinInstancesInService: !Ref NodeAutoScalingGroupDesiredCapacity
+        PauseTime: PT5M
+      
+    
+  EKSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${ClusterName}-ControlPlaneSG
+      VpcId: !Ref VpcId
+      Description: Security group for EKS control plane
+      Tags:
+        - Key: Name
+          Value: !Ref ClusterName
+
+  EKSServerControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - eks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EKSServerControlPlaneRolePolicyAttachment:
+    Type: AWS::IAM::PolicyAttachment
+    Properties:
+      PolicyArn: arn:aws:iam::aws:policy/AmazonEKSServicePolicy
+      Roles:
+        - !Ref EKSServerControlPlaneRole
+
+  EKSCluster:
+    Type: AWS::EKS::Cluster
+    DependsOn:
+      - EKSServerControlPlaneRolePolicyAttachment
+    Properties:
+      Name: !Ref ClusterName
+      RoleArn: !Ref EKSServerControlPlaneRole
+      ResourcesVpcConfig:
+        SubnetIds: !Ref SubnetIds
+        SecurityGroupIds:
+          - !Ref EKSSecurityGroup
+
+  # --------------------------------------------------------------------------
+  # EKS Node Group Resources
+  # --------------------------------------------------------------------------
+
+
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${ClusterName}-${NodeGroupName}-LT
+      VersionDescription: Launch template for EKS worker nodes
+      LaunchTemplateData:
+        InstanceType: !Ref NodeInstanceType
+        ImageId:
+          Fn::Sub: "{{resolve:ssm:${NodeImageIdSSMParam}:${AWS::Region}:latest}}"
+        KeyName: !Ref KeyName
+        IamInstanceProfile:
+          Arn: !GetAtt NodeInstanceRole.Arn
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: !Ref NodeVolumeSize
+              VolumeType: gp2
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            Groups:
+              - !Ref EKSSecurityGroup # Or a specific SG for worker nodes
+            SubnetId: !Select [ 0, !Ref SubnetIds ] # Example: Use the first subnet
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: !Sub ${ClusterName}-${NodeGroupName}-Node
+              - Key: kubernetes.io/cluster/${ClusterName}
+                Value: owned
+          - ResourceType: volume
+            Tags:
+              - Key: kubernetes.io/cluster/${ClusterName}
+                Value: owned
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    DependsOn:
+      - EKSCluster
+      - NodeInstanceRole
+      - NodeLaunchTemplate # Depend on Launch Template
+    Properties:
+      ClusterName: !Ref ClusterName
+      NodeRole: !Ref NodeInstanceRole
+      Subnets: !Ref SubnetIds
+      LaunchTemplate:
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+        Id: !Ref NodeLaunchTemplate
+      ScalingConfig:
+        DesiredSize: !Ref NodeAutoScalingGroupDesiredCapacity
+        MaxSize: !Ref NodeAutoScalingGroupMaxSize
+        MinSize: !Ref NodeAutoScalingGroupMinSize
+      Labels:
+        nodegroup: !Ref NodeGroupName
+      RemoteAccess:
+        Ec2SshKeyName: !Ref KeyName
+        SourceSecurityGroupIds:
+          - !Ref EKSSecurityGroup # Or a specific SG for SSH access
+
+  # --------------------------------------------------------------------------
+  # Lambda Function for Second ENI Attachment (Example - Needs Custom Code)
+  # --------------------------------------------------------------------------
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AttachENIPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AttachNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DescribeInstances
+                Resource: "*" # Consider making this more specific to ENIs and instances
+
+  AttachENILambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub AttachSecondENI-${ClusterName}
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+      Runtime: python3.9
+      Timeout: 30
+      Environment:
+        Variables:
+          MULTUS_SUBNET_IDS: !Join [ ',', !Ref MultusSubnetIds ]
+          MULTUS_SECURITY_GROUP_IDS: !Join [ ',', !Ref MultusSecurityGroupIds ]
+          SRIOV_START_DEV_INDEX: !Ref SriovStartDevIndex
+          SRIOV_END_DEV_INDEX: !Ref SriovEndDevIndex
+
+  # --------------------------------------------------------------------------
+  # CloudWatch Event Rule to Trigger Lambda (Example - Adjust as needed)
+  # --------------------------------------------------------------------------
+  EC2InstanceStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub EC2InstanceStateChangeToRunning-${ClusterName}
+      EventPattern:
+        Source:
+          - aws.ec2
+        DetailType:
+          - EC2 Instance State-change Notification
+        Detail:
+          State:
+            - running
+          "detail.instance-id":
+            - Ref: NodeGroup # This won't directly work for ASG instances. Needs adjustment.
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AttachENILambdaFunction.Arn
+          Id: AttachENILambdaTarget
+
+  PermissionForCloudWatchToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AttachENILambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EC2InstanceStateChangeRule.Arn
+
+Outputs:
+  ClusterName:
+    Description: The name of the EKS Cluster
+    Value: !Ref ClusterName
+  ClusterEndpoint:
+    Description: The endpoint for the EKS Cluster
+    Value: !GetAtt EKSCluster.Endpoint
+  KubeconfigCommand:
+    Description: Command to configure kubectl
+    Value: !Sub 'aws eks update-kubeconfig --name ${ClusterName} --region ${AWS::Region} --role-arn ${EKSServerControlPlaneRole.Arn}'
