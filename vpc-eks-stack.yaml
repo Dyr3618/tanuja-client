@@ -1,463 +1,363 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: EKS Cluster in Singapore Region (ap-southeast-1)
-
-Metadata:
-  Author: Tanuja Padmanabhuni
-  Version: 1.1
-  AWS::CloudFormation::Interface:
-    ParameterGroups:
-      - Label:
-          default: Parameters
-        Parameters:
-          - VPCCidrBlock
-          - PublicCidrBlock1
-          - PublicCidrBlock2
-          - PublicCidrBlock3
-          - PrivateCidrBlock1
-          - PrivateCidrBlock2
-          - PrivateCidrBlock3
-          - EKSClusterVersion
-          - NodeGroupInstanceTypes
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC and EKS Cluster with Self-Managed Node Group
 
 Parameters:
-  VPCCidrBlock:
-    Type: String
-    Default: 10.0.0.0/16
-
-  PublicCidrBlock1:
-    Type: String
-    Default: 10.0.1.0/24
-
-  PublicCidrBlock2:
-    Type: String
-    Default: 10.0.2.0/24
-
-  PublicCidrBlock3:
-    Type: String
-    Default: 10.0.3.0/24
-
-  PrivateCidrBlock1:
-    Type: String
-    Default: 10.0.4.0/24
-
-  PrivateCidrBlock2:
-    Type: String
-    Default: 10.0.5.0/24
-
-  PrivateCidrBlock3:
-    Type: String
-    Default: 10.0.6.0/24
-
-  EKSClusterVersion:
-    Type: String
-    Default: "1.31"
-
   NodeGroupInstanceTypes:
     Type: String
     Default: t3.medium
-
-Mappings:
-  ServicePrincipalPartitionMap:
-    aws:
-      EC2: ec2.amazonaws.com
-      EKS: eks.amazonaws.com
-      EKSFargatePods: eks-fargate-pods.amazonaws.com
-    aws-cn:
-      EC2: ec2.amazonaws.com.cn
-      EKS: eks.amazonaws.com
-      EKSFargatePods: eks-fargate-pods.amazonaws.com
-    aws-us-gov:
-      EC2: ec2.amazonaws.com
-      EKS: eks.amazonaws.com
-      EKSFargatePods: eks-fargate-pods.amazonaws.com
+  ControlPlane:
+    Type: String
+    Default: my-eks-cluster
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
 
 Resources:
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VPCCidrBlock
+      CidrBlock: !Ref VpcCIDR
       EnableDnsSupport: true
       EnableDnsHostnames: true
-      InstanceTenancy: default
       Tags:
         - Key: Name
           Value: !Sub ${AWS::StackName}-vpc
-
   InternetGateway:
-    Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-ig
+    Type: "AWS::EC2::InternetGateway"
 
-  AttachGateway:
-    Type: AWS::EC2::VPCGatewayAttachment
+  VPCGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
     Properties:
-      VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
 
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-public-route-table
+      - Key: Name
+        Value: Public Subnets
+      - Key: Network
+        Value: Public
 
-  RouteInternetGateway:
+  PrivateRouteTable01:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Private Subnet AZ1
+      - Key: Network
+        Value: Private01
+
+  PrivateRouteTable02:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: Private Subnet AZ2
+      - Key: Network
+        Value: Private02
+
+  PublicRoute:
+    DependsOn: VPCGatewayAttachment
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
+
+  PrivateRoute01:
+    DependsOn:
+    - VPCGatewayAttachment
+    - NatGateway01
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable01
       DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway01
 
-  PublicSubnet1:
-    Type: AWS::EC2::Subnet
+  PrivateRoute02:
+    DependsOn:
+    - VPCGatewayAttachment
+    - NatGateway02
+    Type: AWS::EC2::Route
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 0
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PublicCidrBlock1
+      RouteTableId: !Ref PrivateRouteTable02
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway02
+
+  NatGateway01:
+    DependsOn:
+    - NatGatewayEIP1
+    - PublicSubnet01
+    - VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt 'NatGatewayEIP1.AllocationId'
+      SubnetId: !Ref PublicSubnet01
       Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-public-subnet1
-        - Key: kubernetes.io/role/elb
-          Value: 1
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-NatGatewayAZ1'
 
-  PublicRouteTableAssociation1:
-    Type: AWS::EC2::SubnetRouteTableAssociation
+  NatGateway02:
+    DependsOn:
+    - NatGatewayEIP2
+    - PublicSubnet02
+    - VPCGatewayAttachment
+    Type: AWS::EC2::NatGateway
     Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet1
-
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 1
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PublicCidrBlock2
+      AllocationId: !GetAtt 'NatGatewayEIP2.AllocationId'
+      SubnetId: !Ref PublicSubnet02
       Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-public-subnet2
-        - Key: kubernetes.io/role/elb
-          Value: 1
+      - Key: Name
+        Value: !Sub '${AWS::StackName}-NatGatewayAZ2'
 
-  PublicRouteTableAssociation2:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet2
-
-  PublicSubnet3:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 2
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PublicCidrBlock3
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-public-subnet3
-        - Key: kubernetes.io/role/elb
-          Value: 1
-
-  PublicRouteTableAssociation3:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnet3
-
-  EIP1:
-    Type: AWS::EC2::EIP
+  NatGatewayEIP1:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: 'AWS::EC2::EIP'
     Properties:
       Domain: vpc
 
-  NATGateway1:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt EIP1.AllocationId
-      SubnetId: !Ref PublicSubnet1
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-nat-gw1
-
-  EIP2:
-    Type: AWS::EC2::EIP
+  NatGatewayEIP2:
+    DependsOn:
+    - VPCGatewayAttachment
+    Type: 'AWS::EC2::EIP'
     Properties:
       Domain: vpc
 
-  NATGateway2:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt EIP2.AllocationId
-      SubnetId: !Ref PublicSubnet2
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-nat-gw2
-
-  EIP3:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-
-  NATGateway3:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId: !GetAtt EIP3.AllocationId
-      SubnetId: !Ref PublicSubnet3
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-nat-gw3
-
-  PrivateSubnet1:
+  PublicSubnet01:
     Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 01
     Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 0
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PrivateCidrBlock1
-      MapPublicIpOnLaunch: false
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - '0'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PublicSubnet01Block
+      VpcId:
+        Ref: VPC
       Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-subnet1
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PublicSubnet01"
+      - Key: kubernetes.io/role/elb
+        Value: 1
 
-  PrivateRouteTable1:
-    Type: AWS::EC2::RouteTable
+  PublicSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 02
     Properties:
-      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone:
+        Fn::Select:
+        - '1'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PublicSubnet02Block
+      VpcId:
+        Ref: VPC
       Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-route-table1
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PublicSubnet02"
+      - Key: kubernetes.io/role/elb
+        Value: 1
 
-  PrivateRouteTableAssociation1:
+  PrivateSubnet01:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Subnet 03
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '0'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet01Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivateSubnet01"
+      - Key: kubernetes.io/role/internal-elb
+        Value: 1
+
+  PrivateSubnet02:
+    Type: AWS::EC2::Subnet
+    Metadata:
+      Comment: Private Subnet 02
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - '1'
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      CidrBlock:
+        Ref: PrivateSubnet02Block
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Name
+        Value: !Sub "${AWS::StackName}-PrivateSubnet02"
+      - Key: kubernetes.io/role/internal-elb
+        Value: 1
+
+  PublicSubnet01RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable1
-      SubnetId: !Ref PrivateSubnet1
+      SubnetId: !Ref PublicSubnet01
+      RouteTableId: !Ref PublicRouteTable
 
-  PrivateRoute1:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable1
-      NatGatewayId: !Ref NATGateway1
-      DestinationCidrBlock: 0.0.0.0/0
-
-  PrivateSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 1
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PrivateCidrBlock2
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-subnet2
-
-  PrivateRouteTable2:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-route-table2
-
-  PrivateRouteTableAssociation2:
+  PublicSubnet02RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable2
-      SubnetId: !Ref PrivateSubnet2
+      SubnetId: !Ref PublicSubnet02
+      RouteTableId: !Ref PublicRouteTable
 
-  PrivateRoute2:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivateRouteTable2
-      NatGatewayId: !Ref NATGateway2
-      DestinationCidrBlock: 0.0.0.0/0
-
-  PrivateSubnet3:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select
-        - 2
-        - !GetAZs
-          Ref: AWS::Region
-      CidrBlock: !Ref PrivateCidrBlock3
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-subnet3
-
-  PrivateRouteTable3:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-private-route-table3
-
-  PrivateRouteTableAssociation3:
+  PrivateSubnet01RouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable3
-      SubnetId: !Ref PrivateSubnet3
+      SubnetId: !Ref PrivateSubnet01
+      RouteTableId: !Ref PrivateRouteTable01
 
-  PrivateRoute3:
-    Type: AWS::EC2::Route
+  PrivateSubnet02RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      RouteTableId: !Ref PrivateRouteTable3
-      NatGatewayId: !Ref NATGateway3
-      DestinationCidrBlock: 0.0.0.0/0
+      SubnetId: !Ref PrivateSubnet02
+      RouteTableId: !Ref PrivateRouteTable02
 
-  ControlPlane:
-    Type: AWS::EKS::Cluster
+
+
+  # Control Plane Security Group
+  ControlPlaneSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
     Properties:
-      Name: !Sub ${AWS::StackName}-cluster
-      ResourcesVpcConfig:
-        SecurityGroupIds:
-          - !Ref ControlPlaneSecurityGroup
-        SubnetIds:
-          - !Ref PublicSubnet1
-          - !Ref PublicSubnet2
-          - !Ref PublicSubnet3
-          - !Ref PrivateSubnet1
-          - !Ref PrivateSubnet2
-          - !Ref PrivateSubnet3
-      RoleArn: !GetAtt EKSClusterRole.Arn
-      Version: !Ref EKSClusterVersion
+      GroupDescription: EKS Control Plane Security Group
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-cp-sg
 
+  # Node IAM Role and Instance Profile
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        # Add below policy to connect a EC2 Instance which is in pvt sn, doesn't have pulic ip
+        # its just similar to Bastion host
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NodeInstanceRole
+
+  # Node Security Group and Rules
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Worker node SG
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node-sg
+
+  NodeSGIngressFromControlPlane:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodeSecurityGroup
+      SourceSecurityGroupId: !Ref ControlPlaneSecurityGroup
+      IpProtocol: "-1"
+
+  ControlPlaneIngressFromNode:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ControlPlaneSecurityGroup
+      SourceSecurityGroupId: !Ref NodeSecurityGroup
+      IpProtocol: "-1"
   EKSClusterRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Statement:
-          - Action:
-              - sts:AssumeRole
-            Effect: Allow
-            Principal:
-              Service: !FindInMap
-                - ServicePrincipalPartitionMap
-                - !Ref AWS::Partition
-                - EKS
         Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: eks.amazonaws.com
+            Action: sts:AssumeRole
       ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKSClusterPolicy
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKSVPCResourceController
-
-  ControlPlaneSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+  EKSCluster:
+    Type: AWS::EKS::Cluster
     Properties:
-      GroupDescription: Communication between the control plane and worker nodegroups
-      VpcId: !Ref VPC
-      GroupName: !Sub ${AWS::StackName}-eks-control-plane-sg
-
-  ControlPlaneSecurityGroupIngress:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      GroupId: !Ref ControlPlaneSecurityGroup
-      IpProtocol: "-1"
-      SourceSecurityGroupId: !GetAtt ControlPlaneSecurityGroup.GroupId
-      SourceSecurityGroupOwnerId: !Ref AWS::AccountId
-
-  LaunchTemplate:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateData:
-        BlockDeviceMappings:
-          - DeviceName: /dev/xvda
-            Ebs:
-              Iops: 3000
-              Throughput: 125
-              VolumeSize: 80
-              VolumeType: gp3
-        MetadataOptions:
-          HttpPutResponseHopLimit: 2
-          HttpTokens: optional
+      Name: !Ref ControlPlane
+      Version: "1.29"  # or your preferred version
+      RoleArn: !GetAtt EKSClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+          - !Ref PrivateSubnet3
         SecurityGroupIds:
           - !Ref ControlPlaneSecurityGroup
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: Name
-                Value: !Sub ekshandson-ng-${AWS::StackName}-Node
-              - Key: alpha.eksctl.io/nodegroup-name
-                Value: !Sub ng-${AWS::StackName}
-              - Key: alpha.eksctl.io/nodegroup-type
-                Value: managed
-          - ResourceType: volume
-            Tags:
-              - Key: Name
-                Value: !Sub ekshandson-ng-${AWS::StackName}-Node
-              - Key: alpha.eksctl.io/nodegroup-name
-                Value: !Sub ng-${AWS::StackName}
-              - Key: alpha.eksctl.io/nodegroup-type
-                Value: managed
-          - ResourceType: network-interface
-            Tags:
-              - Key: Name
-                Value: !Sub ekshandson-ng-${AWS::StackName}-Node
-              - Key: alpha.eksctl.io/nodegroup-name
-                Value: !Sub ng-${AWS::StackName}
-              - Key: alpha.eksctl.io/nodegroup-type
-                Value: managed
-      LaunchTemplateName: !Sub ${AWS::StackName}-LaunchTemplate
 
-  ManagedNodeGroup:
-    Type: AWS::EKS::Nodegroup
+  # Launch Template for Worker Nodes
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      AmiType: AL2_x86_64
-      ClusterName: !Ref ControlPlane
-      InstanceTypes:
-        - !Ref NodeGroupInstanceTypes
-      Labels:
-        alpha.eksctl.io/cluster-name: !Ref ControlPlane
-        alpha.eksctl.io/nodegroup-name: !Sub ng-${AWS::StackName}
-      LaunchTemplate:
-        Id: !Ref LaunchTemplate
-      NodeRole: !GetAtt NodeInstanceRole.Arn
-      NodegroupName: !Sub ng-${AWS::StackName}
-      ScalingConfig:
-        DesiredSize: 2
-        MaxSize: 3
-        MinSize: 1
-      Subnets:
+      LaunchTemplateName: !Sub ${AWS::StackName}-lt
+      LaunchTemplateData:
+        InstanceType: !Ref NodeGroupInstanceTypes
+        ImageId: ami-01a092351ae812be4  # Replace with dynamic SSM fetch for production
+        IamInstanceProfile:
+          Arn: !GetAtt NodeInstanceProfile.Arn
+        KeyName: waker
+        SecurityGroupIds:
+          - !Ref NodeSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -o xtrace
+            /etc/eks/bootstrap.sh ${ControlPlane} --kubelet-extra-args '--node-labels=role=worker --register-with-taints=node-role.kubernetes.io/worker=:NoSchedule'
+
+  # Auto Scaling Group for Nodes
+  NodeAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
         - !Ref PrivateSubnet3
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
       Tags:
-        alpha.eksctl.io/nodegroup-name: !Sub ng-${AWS::StackName}
-        alpha.eksctl.io/nodegroup-type: managed
-
-  NodeInstanceRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub ${AWS::StackName}-eks-node-role
-      AssumeRolePolicyDocument:
-        Statement:
-          - Action:
-              - sts:AssumeRole
-            Effect: Allow
-            Principal:
-              Service: !FindInMap
-                - ServicePrincipalPartitionMap
-                - !Ref AWS::Partition
-                - EC2
-        Version: "2012-10-17"
-      ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
-      Path: /
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-node
+          PropagateAtLaunch: true
+        - Key: kubernetes.io/cluster/${ControlPlane}
+          Value: owned
+          PropagateAtLaunch: true

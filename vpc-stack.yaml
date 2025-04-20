@@ -333,17 +333,23 @@ Resources:
 
 Outputs:
 
-  PublicSubnetIds:
-    Description: Public Subnets IDs in the VPC
-    Value: !Join [ ",", [ !Ref PublicSubnet01, !Ref PublicSubnet02 ] ]
+  VpcId:
+    Description: "VPC ID"
+    Value: !Ref VPC
     Export:
-      Name: PublicSubnetIds
+      Name: !Sub "${AWS::StackName}-VpcId"
+
+  PublicSubnets:
+    Description: "Public Subnets"
+    Value: !Join [",", !Ref PublicSubnets]
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnets"
   
-  PrivateSubnetId1:
-    Description: Private Subnet 1
-    Value: !Ref PrivateSubnet01
+  PrivateSubnets:
+    Description: "Private Subnets"
+    Value: !Join [",", !Ref PrivateSubnets]
     Export:
-      Name: !Sub "${AWS::StackName}-PrivateSubnetId1"
+      Name: !Sub "${AWS::StackName}-PrivateSubnets"
 
   PrivateSubnetId2:
     Description: Private Subnet 2
@@ -351,22 +357,18 @@ Outputs:
     Export:
       Name: !Sub "${AWS::StackName}-PrivateSubnetId2"
 
-  ControlPlaneSecurityGroupId:
-    Description: Security group for the cluster control plane communication with worker nodes
-    Value: !Ref ControlPlaneSecurityGroup
+  ClusterControlPlaneSecurityGroup:
+    Description: "Security Group for the EKS Control Plane"
+    Value: !Ref ClusterControlPlaneSecurityGroup
     Export:
-      Name: ControlPlaneSecurityGroupId
+      Name: !Sub "${AWS::StackName}-ControlPlaneSecurityGroup"
 
   ALBDNSName:
     Description: DNS name of the ALB
     Value: !GetAtt ALB.DNSName
     Export:
       Name: ALBDNSName
-  VpcId:
-    Description: "VPC ID"
-    Value: !Ref VPC
-    Export:
-      Name: !Sub "${AWS::StackName}-VpcId"
+
   MultusSubnet:
     Description: A single subnet to use for Multus ENIs (e.g., PrivateSubnet01)
     Value: !Ref PrivateSubnet01

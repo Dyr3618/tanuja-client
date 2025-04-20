@@ -484,6 +484,6 @@ Outputs:
  NodeInstanceRole:
    Description: node instance role
    Value: !GetAtt NodeInstanceRole.Arn
-NodeSecurityGroup:
+ NodeSecurityGroup:
    Description: The security group for the node group.
    Value: !ref NodeSecurityGroup

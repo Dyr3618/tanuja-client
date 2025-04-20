@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - rolearn: arn:aws:iam::651706755820:role/K-POC-MainStack-NodeInstanceRole-IFenaHlGE2z0
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+    - rolearn: arn:aws:iam::651706755820:role/K-POC-MainStack-BastionInstanceRole-sKU8eBah91aK
+      username: bastion
+      groups:
+        - system:masters

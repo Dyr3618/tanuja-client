@@ -1,0 +1,102 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Self-managed EKS node group with proper RegionMap for Amazon Linux 2
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: vpc-eks-stack-cluster
+  ClusterEndpoint:
+    Type: String
+  ClusterCA:
+    Type: String
+  KeyName:
+    Type: String
+    Default: waker
+
+Mappings:
+  RegionMap:
+    ap-southeast-1:
+      AMI: ami-0fe8bec493a81c7da  # Amazon Linux 2 EKS Optimized AMI for ap-southeast-1 (as of April 2025)
+
+Resources:
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NodeInstanceRole
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for self-managed worker nodes
+      VpcId:
+        Fn::ImportValue: vpc-stack-VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId:
+            Fn::ImportValue: vpc-stack-ControlPlaneSecurityGroup
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionMap, ap-southeast-1, AMI]
+        InstanceType: t3.medium
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref NodeSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -o xtrace
+            /etc/eks/bootstrap.sh ${ClusterName} --kubelet-extra-args '--node-labels=node.kubernetes.io/lifecycle=normal'
+
+        IamInstanceProfile:
+          Arn: !GetAtt NodeInstanceProfile.Arn
+
+  NodeAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        Fn::ImportValue: vpc-stack-PrivateSubnetIds
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      Tags:
+        - Key: Name
+          Value: vpc-eks-stack-cluster
+          PropagateAtLaunch: true
+
+Outputs:
+  NodeInstanceRole:
+    Description: Instance role for self-managed node group
+    Value: !Ref NodeInstanceRole
+  NodeSecurityGroup:
+    Description: Security group used by the node group
+    Value: !Ref NodeSecurityGroup

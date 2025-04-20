@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Self-managed EKS node group using latest EKS Optimized Amazon Linux 2 AMI via SSM
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: vpc-eks-stack-cluster
+
+  ClusterEndpoint:
+    Type: String
+
+  ClusterCA:
+    Type: String
+
+  KeyName:
+    Type: String
+    Default: waker
+
+Resources:
+  NodeInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref NodeInstanceRole
+
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for self-managed worker nodes
+      VpcId:
+        Fn::ImportValue: vpc-eks-stack-VPC
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 65535
+          SourceSecurityGroupId:
+            Fn::ImportValue: vpc-eks-stack-ControlPlaneSecurityGroup
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Sub "{{resolve:ssm:/aws/service/eks/optimized-ami/1.29/amazon-linux-2/recommended/image_id}}"
+        InstanceType: t3.medium
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref NodeSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -o xtrace
+            /etc/eks/bootstrap.sh ${ClusterName} --kubelet-extra-args '--node-labels=node.kubernetes.io/lifecycle=normal'
+        IamInstanceProfile:
+          Arn: !GetAtt NodeInstanceProfile.Arn
+
+  NodeAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet1
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet2
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet3
+      LaunchTemplate:
+        LaunchTemplateId: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      Tags:
+        - Key: Name
+          Value: vpc-eks-stack-cluster
+          PropagateAtLaunch: true
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref ClusterName
+      NodeRole: !GetAtt NodeInstanceRole.Arn
+      Subnets:
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet1
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet2
+        - Fn::ImportValue: vpc-eks-stack-PrivateSubnet3
+      LaunchTemplate:
+        Name: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      ScalingConfig:
+        MinSize: 1
+        MaxSize: 3
+        DesiredSize: 2
+
+Outputs:
+  NodeInstanceRole:
+    Description: Instance role for self-managed node group
+    Value: !Ref NodeInstanceRole
+
+  NodeSecurityGroup:
+    Description: Security group used by the node group
+    Value: !Ref NodeSecurityGroup
